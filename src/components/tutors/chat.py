@@ -43,10 +43,32 @@ from .data import chats_data_source, guided_tutor_config_table
 from .data_types import ChatData, GuidedAnalysis, Usage
 
 MAX_MESSAGE_LEN = 10_000
+TERMINAL_OBJECTIVE_STATUSES = frozenset({'completed', 'moved on'})
 
 bp = Blueprint('tutors', __name__, url_prefix='/tutor', template_folder='templates')
 
 # NOTE: Blueprint default access controls set in __init__ via availability_requirements
+
+
+def guided_chat_complete(chat: ChatData) -> bool:
+    """Return whether every objective in a guided chat is in a terminal state."""
+    return (
+        chat.mode == 'guided'
+        and chat.analysis is not None
+        and bool(chat.analysis.progress)
+        and all(
+            objective.status in TERMINAL_OBJECTIVE_STATUSES
+            for objective in chat.analysis.progress
+        )
+    )
+
+
+def _chat_blocked_message(chat: ChatData) -> str | None:
+    if chat.warmup_quiz is not None and not chat.warmup_quiz.reviewed:
+        return "Complete the warm-up quiz before starting the chat."
+    if guided_chat_complete(chat):
+        return "This tutor session is complete."
+    return None
 
 
 @bp.route("/new")
@@ -201,7 +223,13 @@ def chat_interface(chat_id: int) -> str | Response:
 
     show_message_input = is_owner and is_current_class
 
-    return render_template("tutor_view.html", chat=chat_data, recent_chats=recent_chats, msg_input=show_message_input)
+    return render_template(
+        "tutor_view.html",
+        chat=chat_data,
+        recent_chats=recent_chats,
+        msg_input=show_message_input,
+        chat_complete=guided_chat_complete(chat_data),
+    )
 
 
 def _can_update_chat(chat: ChatData) -> bool:
@@ -412,13 +440,21 @@ async def _analyze_guided_chat(chat_data: ChatData, llm: LLM) -> ChatData:
 
 
 @bp.route("/progress/<int:chat_id>")
-def get_progress(chat_id: int) -> str:
+def get_progress(chat_id: int) -> Response:
     try:
         chat_data = get_chat(chat_id)
     except DataAccessError:
         abort(400, "Invalid id.")
 
-    return render_template("progress_widget.html", chat=chat_data)
+    response = make_response(
+        render_template(
+            "progress_widget.html",
+            chat=chat_data,
+            chat_complete=guided_chat_complete(chat_data),
+        )
+    )
+    response.headers['X-Chat-Complete'] = str(guided_chat_complete(chat_data)).lower()
+    return response
 
 
 @bp.route("/post_message.sse", methods=["POST"])  # '.sse' extension needed for reverse proxy config to disable buffering / allow streaming
@@ -444,8 +480,9 @@ def new_message(llm: LLM) -> Response:
     if not _can_update_chat(chat):
         return Response("You cannot update this chat.", 403, mimetype='text/plain')
 
-    if chat.warmup_quiz is not None and not chat.warmup_quiz.reviewed:
-        return Response("Complete the warm-up quiz before starting the chat.", 409, mimetype='text/plain')
+    blocked_message = _chat_blocked_message(chat)
+    if blocked_message is not None:
+        return Response(blocked_message, 409, mimetype='text/plain')
 
     messages = chat.messages
 

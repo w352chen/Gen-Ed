@@ -8,12 +8,13 @@ SPDX-License-Identifier: AGPL-3.0-only
 
 {% block body %}
 <section class="section">
-  <div class="container box" style="max-width: 34em">
-    <h1 class="title">Create a local account</h1>
-    <p class="mb-5">
-      After registering, you can create a class and add your own LLM API key,
-      or join a class using an instructor's invitation link.
-    </p>
+  <div class="container panel is-success" style="max-width: 34em">
+    <div class="panel-heading">Create a new local account</div>
+    <div class="panel-block" style="display: block;">
+      <p class="mb-5">
+        This page creates a new account. After registering, you can create a class
+        and add your own LLM API key, or join a class using an instructor's invitation link.
+      </p>
 
     <form action="{{ url_for('auth.register') }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -68,15 +69,14 @@ SPDX-License-Identifier: AGPL-3.0-only
         </div>
       </div>
 
-      <div class="field is-grouped">
-        <div class="control">
+      <div class="field">
+        <div class="control mb-3">
           <button class="button is-link" type="submit">Create account</button>
         </div>
-        <div class="control">
-          <a class="button is-light" href="{{ url_for('auth.login', next=next_url) }}">Back to login</a>
-        </div>
+        <p>Already have an account? <a href="{{ url_for('auth.login', next=next_url) }}">Log in instead</a>.</p>
       </div>
     </form>
+    </div>
   </div>
 </section>
 {% endblock body %}

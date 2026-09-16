@@ -19,12 +19,26 @@ from tests.conftest import AppClient
 def test_login_page(client: AppClient) -> None:
     response = client.get('/auth/login')
     assert response.status_code == 200
-    assert "Username:" in response.text
-    assert "Password:" in response.text
+    assert "Log in to an existing account" in response.text
+    assert "Local account login" in response.text
+    assert "Username" in response.text
+    assert "Password" in response.text
     assert 'name="username"' in response.text
     assert 'name="password"' in response.text
     assert 'type="submit"' in response.text
-    assert 'Create a local account' in response.text
+    assert 'Go to account registration' in response.text
+    assert 'Create a new local account' not in response.text
+
+
+def test_registration_page_is_distinct_from_login(client: AppClient) -> None:
+    response = client.get('/auth/register')
+
+    assert response.status_code == 200
+    assert 'Create a new local account' in response.text
+    assert 'This page creates a new account.' in response.text
+    assert 'name="password_confirm"' in response.text
+    assert 'Log in instead' in response.text
+    assert 'Local account login' not in response.text
 
 
 def _registration_csrf(client: AppClient, next_url: str = '') -> str:

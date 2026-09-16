@@ -102,6 +102,7 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
       errorMessage: '',
       progress: '',
       loading: false,
+      completed: {{ chat_complete | tojson }},
 
       renderMessage(msg) {
         if (msg.role === 'user') {
@@ -143,6 +144,7 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
         const response = await fetch('{{ url_for('tutors.get_progress', chat_id=chat.id) }}');
         if (response.ok) {
           this.progress = await response.text();
+          this.completed = response.headers.get('X-Chat-Complete') === 'true';
         } else {
           console.log(`Fetch error: ${response}`);
         }
@@ -203,9 +205,11 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
             // Append to assistant message
             newResponse.content += chunk;
           }
-          this.reloadProgress();
-          // refocus the message input textarea when done
-          this.$nextTick(() => { this.$refs.msgInput.focus(); });
+          await this.reloadProgress();
+          // refocus the message input textarea when done, unless the tutor is complete
+          if (!this.completed) {
+            this.$nextTick(() => { this.$refs.msgInput.focus(); });
+          }
         } catch (error) {
           newResponse.content += '\n\n[An error occurred]';
           console.error('Streaming error:', error);
@@ -374,18 +378,23 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
               <div class="chat_message chat_message_user" style="padding-right: 0.5em">
                 <div class="field has-addons">
                   <div class="control is-expanded">
-                    <textarea class="textarea is-link" rows=2 name="message" placeholder="Press Ctrl+Enter or ⌘+Enter to send." {% if auth.user_id == chat.user_id %}autofocus{% endif %} x-model="currentMessage" x-ref="msgInput" x-bind:disabled="loading" @keydown.tab="handleTab" @keydown.enter="if ($event.ctrlKey || $event.metaKey) {sendMessage($event.target.form); $event.preventDefault();}"></textarea>
+                    <textarea class="textarea is-link" rows=2 name="message" x-bind:placeholder="completed ? 'This tutor session is complete.' : 'Press Ctrl+Enter or ⌘+Enter to send.'" {% if auth.user_id == chat.user_id and not chat_complete %}autofocus{% endif %} {% if chat_complete %}disabled{% endif %} x-model="currentMessage" x-ref="msgInput" x-bind:disabled="loading || completed" @keydown.tab="handleTab" @keydown.enter="if (($event.ctrlKey || $event.metaKey) && !completed) {sendMessage($event.target.form); $event.preventDefault();}"></textarea>
                   </div>
                   <div class="control">
                     <button
                         class="button is-link"
                         style="height: 100%;"
                         x-bind:class="loading ? 'is-loading' : ''"
+                        x-bind:disabled="loading || completed"
+                        {% if chat_complete %}disabled{% endif %}
                         type="submit" >
                         Send
                     </button>
                   </div>
                 </div>
+                <p class="help has-text-success" x-show="completed">
+                  Tutor session complete. All learning objectives have been addressed.
+                </p>
               </div>
             {% endif %}
             {% if chat.analysis %}

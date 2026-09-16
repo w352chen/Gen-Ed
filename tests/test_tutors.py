@@ -4,6 +4,7 @@
 
 """Tests for tutors component serialization and data models."""
 
+import re
 from typing import Any
 
 import msgspec
@@ -11,6 +12,7 @@ import pytest
 from flask import Flask
 from werkzeug.datastructures import ImmutableMultiDict
 
+from components.tutors.chat import guided_chat_complete
 from components.tutors.data import fmt_analysis
 from components.tutors.data_types import (
     ChatData,
@@ -224,6 +226,72 @@ def test_read_chat_with_analysis_from_database(app: Flask, client: AppClient) ->
     # Verify analysis data is present
     assert 'Variables' in response.text
     assert 'completed' in response.text
+
+
+def test_completed_guided_chat_is_locked(app: Flask, client: AppClient) -> None:
+    completed_chat = ChatData(
+        topic="Completed tutor",
+        mode="guided",
+        messages=[
+            {'role': 'user', 'content': 'Finished'},
+            {'role': 'assistant', 'content': 'Well done'},
+        ],
+        analysis=GuidedAnalysis(
+            summary="All objectives addressed",
+            progress=[
+                GuidedObjectiveProgress(objective="Variables", status="completed"),
+                GuidedObjectiveProgress(objective="Loops", status="moved on"),
+            ],
+        ),
+    )
+    assert guided_chat_complete(completed_chat)
+
+    incomplete_chat = msgspec.structs.replace(
+        completed_chat,
+        analysis=GuidedAnalysis(
+            summary="Still working",
+            progress=[GuidedObjectiveProgress(objective="Variables", status="in progress")],
+        ),
+    )
+    assert not guided_chat_complete(incomplete_chat)
+
+    with app.app_context():
+        cursor = get_db().execute(
+            "INSERT INTO chats (chat_json, user_id, role_id) VALUES (?, ?, ?)",
+            [msgspec.json.encode(completed_chat).decode(), 11, 4],
+        )
+        get_db().commit()
+        chat_id = cursor.lastrowid
+        assert chat_id is not None
+
+    client.login('testuser', 'testpassword')
+    client.get('/classes/switch/2')
+
+    response = client.get(f'/tutor/{chat_id}')
+    assert response.status_code == 200
+    assert 'data-chat-complete="true"' in response.text
+    assert 'Tutor session complete. All learning objectives have been addressed.' in response.text
+    assert re.search(r'<textarea[^>]+disabled', response.text)
+    assert re.search(r'<button[^>]+disabled[^>]*>\s*Send', response.text)
+
+    progress_response = client.get(f'/tutor/progress/{chat_id}')
+    assert progress_response.status_code == 200
+    assert progress_response.headers['X-Chat-Complete'] == 'true'
+
+    post_response = client.post(
+        '/tutor/post_message.sse',
+        data={'id': chat_id, 'message': 'One more message'},
+    )
+    assert post_response.status_code == 409
+    assert post_response.text == 'This tutor session is complete.'
+
+    with app.app_context():
+        saved_json = get_db().execute(
+            "SELECT chat_json FROM chats WHERE id=?",
+            [chat_id],
+        ).fetchone()['chat_json']
+        saved_chat = msgspec.json.decode(saved_json, type=ChatData)
+        assert [message['content'] for message in saved_chat.messages] == ['Finished', 'Well done']
 
 
 def test_read_chat_with_null_usages_from_database(app: Flask, client: AppClient) -> None:
