@@ -195,6 +195,8 @@ class GenEdAppBuilder:
             DEFAULT_LOGIN_ENDPOINT='classes.class_home',
             # Free query tokens given to new users
             DEFAULT_TOKENS=20,
+            # Public local-account registration is opt-in per application.
+            ALLOW_LOCAL_REGISTRATION=False,
             # Default data retention length (prune user data with no activity for this period of time)
             RETENTION_TIME_DAYS=2*365,  # 2 years
 

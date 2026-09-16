@@ -26,6 +26,8 @@ def create_app(test_config: dict[str, Any] | None = None, instance_path: Path | 
         DOCS_DIR=module_dir / 'docs',
         # This deployment requires each class to supply its own LLM API key.
         DEFAULT_TOKENS=0,
+        # Allow instructors and students to create their own local accounts.
+        ALLOW_LOCAL_REGISTRATION=True,
         # Data retention length (prune user data with no activity for this period of time)
         RETENTION_TIME_DAYS=2*365,  # 2 years
     )

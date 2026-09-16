@@ -8,9 +8,11 @@ from dataclasses import dataclass
 import pytest
 from flask import Flask, url_for
 from flask.testing import FlaskCliRunner
+from werkzeug.security import check_password_hash
 from werkzeug.test import TestResponse
 
 from gened.auth import get_auth
+from gened.db import get_db
 from tests.conftest import AppClient
 
 
@@ -22,6 +24,124 @@ def test_login_page(client: AppClient) -> None:
     assert 'name="username"' in response.text
     assert 'name="password"' in response.text
     assert 'type="submit"' in response.text
+    assert 'Create a local account' in response.text
+
+
+def _registration_csrf(client: AppClient, next_url: str = '') -> str:
+    response = client.get('/auth/register', query_string={'next': next_url})
+    assert response.status_code == 200
+    match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+    assert match
+    return match.group(1)
+
+
+def test_public_local_registration(app: Flask, client: AppClient) -> None:
+    csrf_token = _registration_csrf(client, '/profile/')
+    response = client.post(
+        '/auth/register',
+        data={
+            'csrf_token': csrf_token,
+            'next': '/profile/',
+            'username': 'New.User',
+            'password': 'correct horse battery staple',
+            'password_confirm': 'correct horse battery staple',
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.location == '/profile/'
+
+    with app.app_context():
+        row = get_db().execute(
+            """
+            SELECT users.auth_name, users.is_admin, users.is_tester,
+                   users.query_tokens, auth_local.username, auth_local.password
+            FROM users
+            JOIN auth_local ON auth_local.user_id=users.id
+            WHERE auth_local.username=?
+            """,
+            ['new.user'],
+        ).fetchone()
+        assert row is not None
+        assert row['auth_name'] == 'new.user'
+        assert row['username'] == 'new.user'
+        assert not row['is_admin']
+        assert not row['is_tester']
+        assert row['query_tokens'] == 0
+        assert row['password'] != 'correct horse battery staple'
+        assert check_password_hash(row['password'], 'correct horse battery staple')
+
+    with client:
+        profile_response = client.get("/profile/")
+        assert profile_response.status_code == 200
+        auth = get_auth()
+        assert auth.user is not None
+        assert auth.user.display_name == 'new.user'
+
+
+@pytest.mark.parametrize(
+    ('username', 'password', 'password_confirm', 'message'),
+    [
+        ('bad name', 'correct horse battery staple', 'correct horse battery staple', 'Username must be'),
+        ('valid-name', 'too-short', 'too-short', 'Password must be'),
+        ('valid-name', 'correct horse battery staple', 'different password value', 'Passwords do not match'),
+    ],
+)
+def test_invalid_public_registration(
+    client: AppClient,
+    username: str,
+    password: str,
+    password_confirm: str,
+    message: str,
+) -> None:
+    csrf_token = _registration_csrf(client)
+    response = client.post(
+        '/auth/register',
+        data={
+            'csrf_token': csrf_token,
+            'username': username,
+            'password': password,
+            'password_confirm': password_confirm,
+        },
+    )
+
+    assert response.status_code == 400
+    assert message in response.text
+
+
+def test_duplicate_registration_is_case_insensitive(client: AppClient) -> None:
+    csrf_token = _registration_csrf(client)
+    response = client.post(
+        '/auth/register',
+        data={
+            'csrf_token': csrf_token,
+            'username': 'TestUser',
+            'password': 'correct horse battery staple',
+            'password_confirm': 'correct horse battery staple',
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'already registered' in response.text
+
+
+def test_registration_requires_csrf_token(client: AppClient) -> None:
+    _registration_csrf(client)
+    response = client.post(
+        '/auth/register',
+        data={
+            'username': 'new-user',
+            'password': 'correct horse battery staple',
+            'password_confirm': 'correct horse battery staple',
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_registration_can_be_disabled(app: Flask, client: AppClient) -> None:
+    app.config['ALLOW_LOCAL_REGISTRATION'] = False
+    response = client.get('/auth/register')
+    assert response.status_code == 404
 
 
 @dataclass

@@ -57,6 +57,7 @@ CREATE TABLE auth_local (
     created       DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id)
 );
+CREATE UNIQUE INDEX auth_local_username_nocase_idx ON auth_local(username COLLATE NOCASE);
 
 CREATE TABLE auth_external (
     user_id       INTEGER PRIMARY KEY,
@@ -215,4 +216,3 @@ CREATE TABLE config_items (
     created     DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX config_items_by_class_type_name ON config_items(class_id, item_type, name);
-

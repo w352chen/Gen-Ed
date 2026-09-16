@@ -73,6 +73,11 @@ SPDX-License-Identifier: AGPL-3.0-only
         </div>
       </div>
     </div>
+    {% if config['ALLOW_LOCAL_REGISTRATION'] %}
+    <div class="panel-block">
+      <a class="button is-link is-light is-fullwidth" href="{{ url_for('auth.register', next=next_url) }}">Create a local account</a>
+    </div>
+    {% endif %}
     {% endif %}
   </div>
 </section>
