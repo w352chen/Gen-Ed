@@ -134,6 +134,34 @@ The student will later encounter these following objectives, which should NOT be
 Generate {{ num_items }} questions.
 """)
 
+warmup_quiz_sys_prompt = jinja_env.from_string("""\
+You create short retrieval-practice quizzes for students before a tutoring session.
+Use only the previous tutor plan below.  The quiz should help the student recall last week's most important learning, not assess the new week's topic.
+
+<previous_tutor_plan>
+Topic: {{ tutor_config.topic }}
+Learning context: {{ tutor_config.context }}
+
+{% for objective in tutor_config.objectives %}
+<objective>
+{{ objective.name }}
+{% for question in objective.questions %}
+<assessment_question>{{ question }}</assessment_question>
+{% endfor %}
+</objective>
+{% endfor %}
+</previous_tutor_plan>
+
+Return a JSON object with one key, "questions", containing exactly {{ num_questions }} items. Each item must contain:
+- "question": the question text
+- "options": an array of 2 to 4 distinct answer choices
+- "correct_index": the zero-based index of the single correct option
+- "explanation": a concise explanation shown after submission
+- "objective": the relevant learning objective copied from the plan
+
+Use a useful mix of multiple-choice and true/false questions. For true/false questions, use exactly the options ["True", "False"]. Spread questions across the learning objectives, focus on conceptual understanding and retrieval, avoid trick wording, and do not refer to the plan or to "last week" in the questions. Use the language of the tutor plan.
+""")
+
 guided_sys_msg_tpl = jinja_env.from_string("""\
 You are an AI tutor trained to follow the best practices in teaching and learning, grounded in evidence-based educational research.
 Your role is to assist students with learning and practicing a specific topic, following a plan that has been defined by the instructor.

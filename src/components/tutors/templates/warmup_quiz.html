@@ -1,0 +1,92 @@
+{#
+SPDX-FileCopyrightText: 2026 Mark Liffiton <liffiton@gmail.com>
+
+SPDX-License-Identifier: AGPL-3.0-only
+#}
+
+{% extends "base.html" %}
+{% from "chat_history.html" import chat_history %}
+
+{% block extrahead %}
+<style>
+  .quiz-option {
+    display: block;
+    padding: 0.7rem 0.9rem;
+    margin: 0.45rem 0;
+    border: 1px solid #dbdbdb;
+    border-radius: 6px;
+  }
+  .quiz-option.is-correct {
+    border-color: #48c78e;
+    background: #effaf5;
+  }
+  .quiz-option.is-incorrect {
+    border-color: #f14668;
+    background: #feecf0;
+  }
+</style>
+{% endblock extrahead %}
+
+{% block body %}
+<div class="columns is-desktop is-gapless">
+  <div class="column is-three-quarters-desktop">
+    <section class="section">
+      <div class="container content">
+        {% set quiz = chat.warmup_quiz %}
+        <h1 class="title">Warm-up review</h1>
+        <p>
+          Before starting <strong>{{ chat.topic }}</strong>, review material from
+          <strong>{{ quiz.source_tutor_name }}</strong>.
+        </p>
+
+        {% if quiz.completed %}
+          <div class="notification is-info is-light">
+            <strong>Your score: {{ quiz.score }} / {{ quiz.questions | length }}</strong>
+            <br>Review the answers and explanations below, then continue to the tutor chat.
+          </div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('tutors.finish_warmup_quiz' if quiz.completed else 'tutors.submit_warmup_quiz', chat_id=chat.id) }}">
+          {% for question in quiz.questions %}
+            {% set question_index = loop.index0 %}
+            <article class="box">
+              <p class="has-text-grey mb-2">Question {{ loop.index }} of {{ quiz.questions | length }}</p>
+              <div class="is-size-5 mb-3">{{ question.question | markdown }}</div>
+
+              {% for option in question.options %}
+                {% set is_selected = quiz.completed and quiz.answers[question_index] == loop.index0 %}
+                {% set is_correct = quiz.completed and question.correct_index == loop.index0 %}
+                <label class="quiz-option{% if is_correct %} is-correct{% elif is_selected %} is-incorrect{% endif %}">
+                  <input
+                    type="radio"
+                    name="answer_{{ question_index }}"
+                    value="{{ loop.index0 }}"
+                    {% if is_selected %}checked{% endif %}
+                    {% if quiz.completed %}disabled{% else %}required{% endif %}>
+                  <span class="ml-2">{{ option }}</span>
+                  {% if is_correct %}<strong class="has-text-success ml-2">Correct answer</strong>{% endif %}
+                  {% if is_selected and not is_correct %}<strong class="has-text-danger ml-2">Your answer</strong>{% endif %}
+                </label>
+              {% endfor %}
+
+              {% if quiz.completed %}
+                <div class="notification is-light mt-3 mb-0">
+                  {{ question.explanation | markdown }}
+                </div>
+              {% endif %}
+            </article>
+          {% endfor %}
+
+          <button class="button is-link is-medium" type="submit">
+            {{ "Continue to tutor chat" if quiz.completed else "Submit answers" }}
+          </button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div class="column has-background-light">
+    {{ chat_history(recent_chats) }}
+  </div>
+</div>
+{% endblock body %}

@@ -183,3 +183,34 @@ class ConfigTable(msgspec.Struct, Generic[C_co], frozen=True, kw_only=True):
             return None
 
         return self.config_item_class.from_row(row)
+
+    def get_previous_item(self, item_id: int) -> C_co | None:
+        """Return the item immediately before ``item_id`` in class order.
+
+        Config tables use class order for their instructor-defined sequence.  A
+        missing predecessor therefore means the requested item is the first in
+        that sequence.
+        """
+        db = get_db()
+        auth = get_auth()
+        class_id = auth.cur_class.class_id if auth.cur_class else None
+
+        row = db.execute(
+            """
+            SELECT previous.*
+            FROM config_items AS current
+            JOIN config_items AS previous
+              ON previous.class_id = current.class_id
+             AND previous.item_type = current.item_type
+             AND previous.class_order < current.class_order
+            WHERE current.id=? AND current.class_id=? AND current.item_type=?
+            ORDER BY previous.class_order DESC
+            LIMIT 1
+            """,
+            [item_id, class_id, self.name]
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return self.config_item_class.from_row(row)

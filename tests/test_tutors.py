@@ -7,6 +7,7 @@
 from typing import Any
 
 import msgspec
+import pytest
 from flask import Flask
 from werkzeug.datastructures import ImmutableMultiDict
 
@@ -18,6 +19,8 @@ from components.tutors.data_types import (
     GuidedObjectiveProgress,
     LearningObjective,
     TutorConfig,
+    WarmupQuiz,
+    WarmupQuizQuestion,
 )
 from gened.db import get_db
 from tests.conftest import AppClient
@@ -69,6 +72,37 @@ def test_chat_data_roundtrip() -> None:
     assert restored2 == minimal
     assert restored2.topic == ""
     assert restored2.messages == []
+
+
+def test_chat_data_roundtrip_with_warmup_quiz() -> None:
+    quiz = WarmupQuiz(
+        source_tutor_name="Week 1",
+        questions=[
+            WarmupQuizQuestion(
+                question="Python lists are mutable.",
+                options=["True", "False"],
+                correct_index=0,
+                explanation="List contents can be changed after creation.",
+                objective="Explain list mutability",
+            )
+        ],
+        answers=[0],
+        score=1,
+        completed=True,
+    )
+    original = ChatData(
+        topic="Week 2",
+        messages=[{'role': 'system', 'content': 'Tutor instructions'}],
+        mode="guided",
+        warmup_quiz=quiz,
+    )
+
+    restored = msgspec.json.decode(msgspec.json.encode(original), type=ChatData)
+
+    assert restored == original
+    assert restored.warmup_quiz is not None
+    assert restored.warmup_quiz.score == 1
+    assert not restored.warmup_quiz.reviewed
 
 
 def test_tutor_config_roundtrip() -> None:
@@ -304,3 +338,140 @@ def test_chat_save_and_retrieve(app: Flask, client: AppClient) -> None:
     assert 'You are a helpful tutor' not in response.text
     assert 'Hello' in response.text
     assert 'Hi there' in response.text
+
+
+def test_guided_chat_warmup_quiz_flow(
+    app: Flask,
+    client: AppClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = TutorConfig(
+        name="Week 1: Python values",
+        topic="Python values",
+        context="An introductory Python course",
+        objectives=[
+            LearningObjective(
+                name="Distinguish mutable and immutable values",
+                questions=["Which built-in Python values can be changed in place?"],
+            )
+        ],
+        opening_message="Welcome to week 1",
+    )
+    current = TutorConfig(
+        name="Week 2: Functions",
+        topic="Python functions",
+        context="An introductory Python course",
+        objectives=[LearningObjective(name="Define and call a function")],
+        opening_message="Welcome to week 2",
+    )
+
+    with app.app_context():
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
+            VALUES (2, 'guided_tutor', ?, 10, '0001-01-01', ?)
+            """,
+            [previous.name, previous.to_json()],
+        )
+        cursor = db.execute(
+            """
+            INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
+            VALUES (2, 'guided_tutor', ?, 11, '0001-01-01', ?)
+            """,
+            [current.name, current.to_json()],
+        )
+        current_id = cursor.lastrowid
+        db.commit()
+
+    async def fake_generate_warmup(previous_tutor: TutorConfig, _llm: Any) -> WarmupQuiz:
+        assert previous_tutor.name == previous.name
+        return WarmupQuiz(
+            source_tutor_name=previous_tutor.name,
+            questions=[
+                WarmupQuizQuestion(
+                    question=f"Review question {index + 1}",
+                    options=["Correct", "Incorrect"],
+                    correct_index=0,
+                    explanation="This is the explanation.",
+                    objective=previous_tutor.objectives[0].name,
+                )
+                for index in range(10)
+            ],
+        )
+
+    monkeypatch.setattr("components.tutors.chat.generate_warmup_quiz", fake_generate_warmup)
+
+    client.login('testuser', 'testpassword')
+    client.get('/classes/switch/2')
+    response = client.post('/tutor/new/guided', data={'tutor_id': current_id})
+    assert response.status_code == 302
+    chat_url = response.headers['Location']
+
+    response = client.get(chat_url)
+    assert response.status_code == 200
+    assert 'Warm-up review' in response.text
+    assert previous.name in response.text
+    assert 'Question 10 of 10' in response.text
+
+    chat_id = int(chat_url.rstrip('/').rsplit('/', 1)[1])
+    response = client.post('/tutor/post_message.sse', data={'id': chat_id, 'message': 'Skip the quiz'})
+    assert response.status_code == 409
+
+    response = client.post(
+        f'/tutor/{chat_id}/warmup',
+        data={f'answer_{index}': '0' for index in range(10)},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert 'Your score: 10 / 10' in response.text
+    assert 'Correct answer' in response.text
+
+    response = client.post(f'/tutor/{chat_id}/warmup/continue', follow_redirects=True)
+    assert response.status_code == 200
+    assert 'Warm-up review' not in response.text
+    assert 'Welcome to week 2' in response.text
+
+    with app.app_context():
+        chat_json = get_db().execute("SELECT chat_json FROM chats WHERE id=?", [chat_id]).fetchone()['chat_json']
+        saved_chat = msgspec.json.decode(chat_json, type=ChatData)
+        assert saved_chat.warmup_quiz is not None
+        assert saved_chat.warmup_quiz.reviewed
+        assert "scored 10/10" in saved_chat.messages[0]['content']
+
+
+def test_first_guided_tutor_starts_without_warmup(
+    app: Flask,
+    client: AppClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_tutor = TutorConfig(
+        name="Week 1",
+        topic="Course introduction",
+        context="An introductory course",
+        objectives=[LearningObjective(name="Recognize the core terminology")],
+        opening_message="Welcome to the first week",
+    )
+    with app.app_context():
+        cursor = get_db().execute(
+            """
+            INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
+            VALUES (2, 'guided_tutor', ?, 10, '0001-01-01', ?)
+            """,
+            [first_tutor.name, first_tutor.to_json()],
+        )
+        tutor_id = cursor.lastrowid
+        get_db().commit()
+
+    async def unexpected_generate(_previous_tutor: TutorConfig, _llm: Any) -> WarmupQuiz:
+        pytest.fail("The first tutor must not generate a warm-up quiz")
+
+    monkeypatch.setattr("components.tutors.chat.generate_warmup_quiz", unexpected_generate)
+    client.login('testuser', 'testpassword')
+    client.get('/classes/switch/2')
+
+    response = client.post('/tutor/new/guided', data={'tutor_id': tutor_id}, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert 'Warm-up review' not in response.text
+    assert 'Welcome to the first week' in response.text

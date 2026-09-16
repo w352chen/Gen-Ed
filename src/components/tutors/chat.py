@@ -38,7 +38,7 @@ from gened.db import get_db
 from gened.llm import LLM, ChatMessage, with_llm
 
 from . import prompts
-from .chat_helpers import create_guided_chat, create_inquiry_chat
+from .chat_helpers import create_guided_chat, create_inquiry_chat, generate_warmup_quiz
 from .data import chats_data_source, guided_tutor_config_table
 from .data_types import ChatData, GuidedAnalysis, Usage
 
@@ -144,7 +144,17 @@ def new_guided_chat(llm: LLM) -> Response:
         flash("Tutor not found.", "danger")
         return make_response(render_template("error.html"), 400)
 
-    chat = create_guided_chat(tutor_config)
+    warmup_quiz = None
+    assert tutor_config.row_id is not None
+    previous_tutor = guided_tutor_config_table.get_previous_item(tutor_config.row_id)
+    if previous_tutor is not None and previous_tutor.objectives:
+        try:
+            warmup_quiz = asyncio.run(generate_warmup_quiz(previous_tutor, llm))
+        except (msgspec.DecodeError, msgspec.ValidationError, ValueError) as e:
+            current_app.logger.error(f"Failed to generate warm-up quiz from tutor {previous_tutor.row_id}: {e}")
+            flash("The review quiz could not be generated, so you can continue directly to the chat.", "warning")
+
+    chat = create_guided_chat(tutor_config, warmup_quiz=warmup_quiz)
 
     if tutor_config.opening_message:
         # Use the pre-generated/instructor-written opening message; no LLM call needed.
@@ -180,9 +190,101 @@ def chat_interface(chat_id: int) -> str | Response:
     assert auth.user
     is_owner = auth.user.id == chat_data.user_id
     is_current_class = auth.cur_class is not None and auth.cur_class.class_id == chat_data.class_id
+    warmup_active = (
+        is_owner
+        and is_current_class
+        and chat_data.warmup_quiz is not None
+        and not chat_data.warmup_quiz.reviewed
+    )
+    if warmup_active:
+        return render_template("warmup_quiz.html", chat=chat_data, recent_chats=recent_chats)
+
     show_message_input = is_owner and is_current_class
 
     return render_template("tutor_view.html", chat=chat_data, recent_chats=recent_chats, msg_input=show_message_input)
+
+
+def _can_update_chat(chat: ChatData) -> bool:
+    auth = get_auth()
+    return (
+        auth.user is not None
+        and auth.cur_class is not None
+        and auth.user.id == chat.user_id
+        and auth.cur_class.class_id == chat.class_id
+    )
+
+
+@bp.route("/<int:chat_id>/warmup", methods=["POST"])
+@class_enabled_required
+def submit_warmup_quiz(chat_id: int) -> Response:
+    try:
+        chat = get_chat(chat_id)
+    except DataAccessError:
+        abort(400, "Invalid id.")
+
+    if not _can_update_chat(chat):
+        abort(403)
+
+    quiz = chat.warmup_quiz
+    if quiz is None:
+        abort(400, "This chat has no warm-up quiz.")
+    if quiz.completed:
+        return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
+
+    answers: list[int] = []
+    for index, question in enumerate(quiz.questions):
+        raw_answer = request.form.get(f"answer_{index}")
+        try:
+            answer = int(raw_answer) if raw_answer is not None else -1
+        except ValueError:
+            answer = -1
+        if not 0 <= answer < len(question.options):
+            flash("Please answer every review question before submitting.", "warning")
+            return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
+        answers.append(answer)
+
+    quiz.answers = answers
+    quiz.score = sum(
+        answer == question.correct_index
+        for answer, question in zip(answers, quiz.questions, strict=True)
+    )
+    quiz.completed = True
+
+    result_lines = [
+        "Before this conversation, the student completed a review quiz based on "
+        f"the previous tutor plan ({quiz.source_tutor_name}) and scored {quiz.score}/{len(quiz.questions)}.",
+        "Use these results only to identify material that may benefit from reinforcement:",
+    ]
+    for answer, question in zip(answers, quiz.questions, strict=True):
+        result = "correct" if answer == question.correct_index else "incorrect"
+        result_lines.append(
+            f"- {question.objective or 'Prior objective'}: {result}. "
+            f"Question: {question.question} Correct answer: {question.options[question.correct_index]}"
+        )
+    chat.messages[0]['content'] += "\n\n" + "\n".join(result_lines)
+    save_chat(chat)
+
+    return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
+
+
+@bp.route("/<int:chat_id>/warmup/continue", methods=["POST"])
+@class_enabled_required
+def finish_warmup_quiz(chat_id: int) -> Response:
+    try:
+        chat = get_chat(chat_id)
+    except DataAccessError:
+        abort(400, "Invalid id.")
+
+    if not _can_update_chat(chat):
+        abort(403)
+
+    quiz = chat.warmup_quiz
+    if quiz is None or not quiz.completed:
+        abort(400, "Complete the warm-up quiz before continuing.")
+
+    quiz.reviewed = True
+    save_chat(chat)
+    return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
 
 
 def get_chat(chat_id: int) -> ChatData:
@@ -338,6 +440,12 @@ def new_message(llm: LLM) -> Response:
         chat = get_chat(chat_id)
     except DataAccessError:
         return Response("Invalid id.", 400, mimetype='text/plain')
+
+    if not _can_update_chat(chat):
+        return Response("You cannot update this chat.", 403, mimetype='text/plain')
+
+    if chat.warmup_quiz is not None and not chat.warmup_quiz.reviewed:
+        return Response("Complete the warm-up quiz before starting the chat.", 409, mimetype='text/plain')
 
     messages = chat.messages
 

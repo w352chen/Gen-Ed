@@ -24,6 +24,30 @@ class QuestionsResponse(msgspec.Struct):
     questions: list[str]
 
 
+class WarmupQuizQuestion(msgspec.Struct):
+    """A single multiple-choice or true/false warm-up question."""
+    question: str
+    options: list[str]
+    correct_index: int
+    explanation: str
+    objective: str = ""
+
+
+class WarmupQuizResponse(msgspec.Struct):
+    """Structured response expected from the LLM quiz generator."""
+    questions: list[WarmupQuizQuestion]
+
+
+class WarmupQuiz(msgspec.Struct, kw_only=True):
+    """A generated warm-up quiz and one student's attempt."""
+    source_tutor_name: str
+    questions: list[WarmupQuizQuestion]
+    answers: list[int] = []
+    score: int | None = None
+    completed: bool = False
+    reviewed: bool = False
+
+
 class ContextDocument(msgspec.Struct, kw_only=True):
     filename: str
     text: str
@@ -143,6 +167,7 @@ class ChatData(msgspec.Struct, kw_only=True, omit_defaults=True):
     context_name: str | None = None
     usages: list[Usage] = []
     analysis: GuidedAnalysis | None = None
+    warmup_quiz: WarmupQuiz | None = None
 
     # We have to cast to list[ChatMessage] before passing these into OpenAI API
     # functions, because MyPy can't tell our custom ChatMessageX is a valid
