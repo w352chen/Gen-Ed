@@ -104,8 +104,8 @@ def test_get_llm_no_key_found_student(app: Flask, mock_auth: MagicMock) -> None:
             get_llm(use_system_key=False, spend_token=False)
 
 
-def test_get_llm_creator_fallthrough(app: Flask, mock_auth: MagicMock) -> None:
-    """Test that the creator of a class falls through to tokens if the class has no key."""
+def test_get_llm_creator_requires_class_key(app: Flask, mock_auth: MagicMock) -> None:
+    """Test that a class creator cannot fall back to the deployment-wide key."""
     with app.app_context():
         db = get_db()
         # Class 2 is User class created by testuser(11).
@@ -115,16 +115,25 @@ def test_get_llm_creator_fallthrough(app: Flask, mock_auth: MagicMock) -> None:
 
         mock_auth.user_id = 11  # creator of class 2
         mock_auth.cur_class.class_id = 2
-        mock_auth.user.auth_provider = "demo"  # use tokens
         mock_auth.user.query_tokens = 5
 
-        # Should not raise NoKeyFoundError, but fall through to tokens
-        llm = get_llm(use_system_key=False, spend_token=True)
-        assert llm.api_key == app.config['SYSTEM_API_KEY']
-        assert llm.tokens_remaining == 4
+        with pytest.raises(NoKeyFoundError):
+            get_llm(use_system_key=False, spend_token=True)
 
         new_tokens = db.execute("SELECT query_tokens FROM users WHERE id=11").fetchone()[0]
-        assert new_tokens == 4
+        assert new_tokens == 5
+
+
+def test_get_llm_without_optional_system_key(app: Flask, mock_auth: MagicMock) -> None:
+    with app.app_context():
+        app.config['SYSTEM_API_KEY'] = None
+        mock_auth.user_id = 21
+        mock_auth.cur_class = None
+        mock_auth.user.auth_provider = "demo"
+        mock_auth.user.query_tokens = 10
+
+        with pytest.raises(NoKeyFoundError):
+            get_llm(use_system_key=False, spend_token=True)
 
 def test_get_llm_no_tokens(app: Flask, mock_auth: MagicMock) -> None:
     with app.app_context():
@@ -198,7 +207,7 @@ def test_decorator_no_key(test_route_app: Flask, client: AppClient) -> None:
 
     response = client.get('/test/llm_decorator')
     assert response.status_code == 400
-    assert "No API key set" in response.text
+    assert "No API key is available" in response.text
 
 
 # *no tokens left* case covered in test_demo_links:test_valid_demo_link

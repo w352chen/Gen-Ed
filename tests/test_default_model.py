@@ -28,6 +28,29 @@ def test_valid_default_model(app: Flask) -> None:
     assert isinstance(test_app, Flask)
 
 
+def test_app_starts_without_system_api_key(
+    app: Flask,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance_path = Path(app.instance_path)
+    monkeypatch.delenv('SYSTEM_API_KEY', raising=False)
+
+    test_app = codehelp.create_app(
+        test_config={
+            'TESTING': True,
+            'DATABASE': instance_path / 'test.db',
+            'SYSTEM_MODEL_SHORTNAME': app.config['SYSTEM_MODEL_SHORTNAME'],
+        },
+        instance_path=instance_path,
+    )
+
+    assert test_app.config['SYSTEM_API_KEY'] is None
+
+
+def test_codehelp_disables_system_funded_tokens(app: Flask) -> None:
+    assert app.config['DEFAULT_TOKENS'] == 0
+
+
 def test_invalid_model_shortname(app: Flask) -> None:
     """Test that an invalid model shortname raises an error.
 

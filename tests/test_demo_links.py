@@ -68,7 +68,7 @@ def test_logged_in(client: AppClient) -> None:
 
 
 def test_instructor_demo_link(client: AppClient) -> None:
-    """Test that instructor demo links create a class and allow LLM access via tokens."""
+    """Test that an instructor demo class cannot use a deployment-wide key."""
     app = client.application
 
     # Access the link
@@ -91,11 +91,12 @@ def test_instructor_demo_link(client: AppClient) -> None:
         role_row = db.execute("SELECT role FROM roles WHERE user_id=? AND class_id=?", [user_id, class_id]).fetchone()
         assert role_row['role'] == 'instructor'
 
-    # Try an LLM action that spends a token (e.g. /help/request)
-    # The user should have 5 tokens initially.
-    client.post('/help/request', data={'code': 'c', 'error': 'e', 'issue': 'i'})
+    # A class without its own key must not fall back to system-funded tokens.
+    response = client.post('/help/request', data={'code': 'c', 'error': 'e', 'issue': 'i'})
+    assert response.status_code == 400
+    assert "No API key is available" in response.text
 
     with app.app_context():
         db = get_db()
         tokens = db.execute("SELECT query_tokens FROM users WHERE id=?", [user_id]).fetchone()['query_tokens']
-        assert tokens == 4
+        assert tokens == 5

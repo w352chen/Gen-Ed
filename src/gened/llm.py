@@ -139,7 +139,9 @@ def get_llm(*, use_system_key: bool, spend_token: bool) -> LLM:
         """ Factory function to initialize a default client (using the system key)
             only if/when needed.
         """
-        system_key = current_app.config["SYSTEM_API_KEY"]
+        system_key = current_app.config.get("SYSTEM_API_KEY")
+        if not system_key:
+            raise NoKeyFoundError
         system_model = current_app.config["SYSTEM_MODEL_SHORTNAME"]
         model = get_model(by_shortname=system_model)
         assert model is not None
@@ -179,11 +181,9 @@ def get_llm(*, use_system_key: bool, spend_token: bool) -> LLM:
             model.api_key = class_row['llm_api_key']
             return model
 
-        # here, we have an active class with no API key:
-        # only the creator/owner of the class can proceed (using tokens if they have any)
-        if auth.user_id != class_row['creator_user_id']:
-            # everyone else gets a No API Key error
-            raise NoKeyFoundError
+        # A class must always supply its own API key. Do not fall back to a
+        # deployment-wide key, even for the class creator.
+        raise NoKeyFoundError
 
     assert auth.user is not None
 
@@ -245,7 +245,7 @@ def with_llm(*, spend_token: bool, is_api: bool = False, use_system_key: bool = 
             except ClassDisabledError:
                 return handle_error("Error: The current class is archived or disabled.")
             except NoKeyFoundError:
-                return handle_error("Error: No API key set.  An API key must be set by the instructor before this page can be used.")
+                return handle_error("Error: No API key is available. An instructor must add one in the class language model settings before this page can be used.")
             except NoTokensError:
                 return handle_error("You have used all of your free queries.  If you are using this application in a class, please connect using the link from your class for continued access.  Otherwise, you can create a class and add an API key or contact us if you want to continue using this application.")
 

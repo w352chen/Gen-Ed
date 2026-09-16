@@ -67,10 +67,12 @@ Set Up an Application
      and other persistent files.  Commonly set to `instance`.
    - `SECRET_KEY`: Used to sign session cookies.  Generate a secure random
      string for this.
-   - `SYSTEM_API_KEY`: Your LLM API key to be used for queries outside of a
-     class context (e.g. for free queries).
    - `SYSTEM_MODEL_SHORTNAME`: Name from the application database of the model
      to be used outside of a class context.  `GPT-5.6 Luna` is a good default.
+
+   `SYSTEM_API_KEY` is optional. Set it only if the deployment should fund
+   queries outside a class context. Otherwise, each instructor must add an LLM
+   API key to their class before the class can submit queries.
 
 *Optionally*, if you want to allow logins from 3rd party authentication
 providers, set any of the following pairs with IDs/secrets obtained from

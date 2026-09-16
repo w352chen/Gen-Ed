@@ -210,10 +210,9 @@ class GenEdAppBuilder:
         # Add vars set in .env, loaded by load_dotenv() above, to config dictionary.
         # Required variables:
         #  - SECRET_KEY: used by Flask to sign session cookies
-        #  - SYSTEM_API_KEY: the "system" LLM API key used in certain situations
         #  - SYSTEM_MODEL_SHORTNAME: shortname of model (in db) used for 'system' completions
         #    (see models table in db)
-        for varname in ["SECRET_KEY", "SYSTEM_API_KEY", "SYSTEM_MODEL_SHORTNAME"]:
+        for varname in ["SECRET_KEY", "SYSTEM_MODEL_SHORTNAME"]:
             try:
                 env_var = os.environ[varname]
             except KeyError as e:
@@ -221,6 +220,11 @@ class GenEdAppBuilder:
             base_config[varname] = env_var
 
         # Optional variables:
+        #  - SYSTEM_API_KEY: used only for system-funded queries outside a class
+        #    or routes that explicitly request the system model. Deployments where
+        #    every class supplies its own key can leave this unset.
+        base_config["SYSTEM_API_KEY"] = os.environ.get("SYSTEM_API_KEY") or None
+
         #  - AGE_PUBLIC_KEY: used to encrypt database backups and exports
         varname = "AGE_PUBLIC_KEY"
         try:
