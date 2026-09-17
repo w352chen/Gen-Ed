@@ -2,18 +2,13 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 
-import hmac
 import random
-import re
-import secrets
-import sqlite3
 from dataclasses import dataclass, field
 from sqlite3 import Row
 from typing import Literal
 
 from flask import (
     Blueprint,
-    abort,
     current_app,
     flash,
     g,
@@ -23,7 +18,7 @@ from flask import (
     session,
     url_for,
 )
-from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.security import check_password_hash
 from werkzeug.wrappers.response import Response
 
 from .db import get_db
@@ -31,10 +26,6 @@ from .redir import safe_redirect_next
 
 # Constants
 AUTH_SESSION_KEY = "__gened_auth"
-REGISTRATION_CSRF_SESSION_KEY = "__gened_registration_csrf"
-MIN_REGISTRATION_PASSWORD_LENGTH = 12
-MAX_REGISTRATION_PASSWORD_LENGTH = 128
-USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,31}$")
 
 AuthProviderExt = Literal['lti', 'google', 'github', 'microsoft']
 AuthProviderLocal = Literal['local', 'demo', 'nologin']
@@ -373,108 +364,12 @@ def login() -> str:
     next_url = request.args.get('next', '')
     return render_template("login.html", hide_login_button=True, anonymous=anonymous, next_url=next_url)
 
-
-def _registration_csrf_token() -> str:
-    token = session.get(REGISTRATION_CSRF_SESSION_KEY)
-    if not isinstance(token, str):
-        token = secrets.token_urlsafe(32)
-        session[REGISTRATION_CSRF_SESSION_KEY] = token
-    return token
-
-
-def _registration_error(username: str, password: str, password_confirm: str) -> str | None:
-    if not USERNAME_PATTERN.fullmatch(username):
-        return "Username must be 3-32 characters and use only letters, numbers, periods, underscores, or hyphens."
-    if not MIN_REGISTRATION_PASSWORD_LENGTH <= len(password) <= MAX_REGISTRATION_PASSWORD_LENGTH:
-        return f"Password must be {MIN_REGISTRATION_PASSWORD_LENGTH}-{MAX_REGISTRATION_PASSWORD_LENGTH} characters long."
-    if password != password_confirm:
-        return "Passwords do not match."
-    return None
-
-
-def _create_local_user(username: str, password: str) -> int | None:
-    """Create a non-privileged local user, or return None for a duplicate username."""
-    db = get_db()
-    existing = db.execute(
-        "SELECT 1 FROM auth_local WHERE username=? COLLATE NOCASE",
-        [username],
-    ).fetchone()
-    if existing:
-        return None
-
-    provider_row = db.execute("SELECT id FROM auth_providers WHERE name='local'").fetchone()
-    assert provider_row is not None
-
-    try:
-        cur = db.execute(
-            "INSERT INTO users(auth_provider, auth_name, query_tokens) VALUES(?, ?, 0)",
-            [provider_row['id'], username],
-        )
-        user_id = cur.lastrowid
-        assert user_id is not None
-        db.execute(
-            "INSERT INTO auth_local(user_id, username, password) VALUES(?, ?, ?)",
-            [user_id, username, generate_password_hash(password)],
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        db.rollback()
-        return None
-
-    return user_id
-
-
-@bp.route("/register", methods=['GET', 'POST'])
-def register() -> str | Response | tuple[str, int]:
-    if not current_app.config.get('ALLOW_LOCAL_REGISTRATION', False):
-        abort(404)
-
-    if get_auth().user is not None:
-        return redirect(url_for(current_app.config['DEFAULT_LOGIN_ENDPOINT']))
-
-    next_url = request.values.get('next', '')
-    csrf_token = _registration_csrf_token()
-
-    if request.method == 'GET':
-        return render_template("register.html", csrf_token=csrf_token, next_url=next_url)
-
-    submitted_token = request.form.get('csrf_token', '')
-    if not hmac.compare_digest(csrf_token, submitted_token):
-        abort(400, "Invalid registration request.")
-
-    username = request.form.get('username', '').strip().casefold()
-    password = request.form.get('password', '')
-    password_confirm = request.form.get('password_confirm', '')
-
-    error = _registration_error(username, password, password_confirm)
-    user_id = None
-    if error is None:
-        user_id = _create_local_user(username, password)
-        if user_id is None:
-            error = "That username is already registered."
-
-    if error is not None:
-        flash(error, "warning")
-        return render_template(
-            "register.html",
-            csrf_token=csrf_token,
-            next_url=next_url,
-            username=username,
-        ), 400
-
-    assert user_id is not None
-    session.pop(REGISTRATION_CSRF_SESSION_KEY, None)
-    set_session_auth_user(user_id)
-    set_session_auth_class(None)
-    current_app.logger.info(f"New local account: {username}")
-    return safe_redirect_next(default_endpoint=current_app.config['DEFAULT_LOGIN_ENDPOINT'])
-
 @bp.route("/local_login", methods=['POST'])
 def local_login() -> Response:
-    username = request.form['username'].strip()
+    username = request.form['username']
     password = request.form['password']
     db = get_db()
-    auth_row = db.execute("SELECT * FROM auth_local JOIN users ON auth_local.user_id=users.id WHERE username=? COLLATE NOCASE", [username]).fetchone()
+    auth_row = db.execute("SELECT * FROM auth_local JOIN users ON auth_local.user_id=users.id WHERE username=?", [username]).fetchone()
 
     if not auth_row or not check_password_hash(auth_row['password'], password):
         flash("Invalid username or password.", "warning")
