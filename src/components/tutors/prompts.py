@@ -134,13 +134,23 @@ The student will later encounter these following objectives, which should NOT be
 Generate {{ num_items }} questions.
 """)
 
-warmup_quiz_sys_prompt = jinja_env.from_string("""\
-You create short retrieval-practice quizzes for students before a tutoring session.
-Use only the previous tutor plan below.  The quiz should help the student recall last week's most important learning, not assess the new week's topic.
+assessment_quiz_sys_prompt = jinja_env.from_string("""\
+You create a short {{ "diagnostic warm-up before tutoring" if quiz_kind == "warmup" else "learning check after tutoring" }}.
+Use only the current tutor plan below. The assessment must measure this session's learning objectives, not material from a previous session.
 
-<previous_tutor_plan>
+<current_tutor_plan>
 Topic: {{ tutor_config.topic }}
 Learning context: {{ tutor_config.context }}
+
+<instructor_materials>
+{% for document in tutor_config.documents %}
+{% if 'setup' in document.use_in %}
+<document name="{{ document.filename }}">
+{{ document.text }}
+</document>
+{% endif %}
+{% endfor %}
+</instructor_materials>
 
 {% for objective in tutor_config.objectives %}
 <objective>
@@ -150,17 +160,38 @@ Learning context: {{ tutor_config.context }}
 {% endfor %}
 </objective>
 {% endfor %}
-</previous_tutor_plan>
+</current_tutor_plan>
+
+{% if quiz_kind == "wrapup" %}
+The warm-up used these questions:
+<warmup_questions>
+{% for question in warmup_questions %}
+- [{{ question.objective }}] {{ question.question }}
+{% endfor %}
+</warmup_questions>
+Create alternate items measuring the same objectives at comparable difficulty, but use different wording and examples. Do not copy a warm-up question.
+{% endif %}
 
 Return a JSON object with one key, "questions", containing exactly {{ num_questions }} items. Each item must contain:
 - "question": the question text
-- "options": an array of 2 to 4 distinct answer choices
-- "correct_index": the zero-based index of the single correct option
+- "options": an array of 2 to 5 distinct answer choices
+- "question_type": one of "single_choice", "multiple_choice", or "true_false"
+- "correct_indices": an array containing the zero-based index of every correct option
 - "explanation": a concise explanation shown after submission
 - "objective": the relevant learning objective copied from the plan
 
-Use a useful mix of multiple-choice and true/false questions. For true/false questions, use exactly the options ["True", "False"]. Spread questions across the learning objectives, focus on conceptual understanding and retrieval, avoid trick wording, and do not refer to the plan or to "last week" in the questions. Use the language of the tutor plan.
+Requirements:
+- Include all three question types: single choice, multiple choice, and true/false.
+- For single-choice and true/false questions, provide exactly one correct index.
+- For multiple-choice questions, provide at least two correct indices and at least one incorrect option.
+- For true/false questions, use exactly the options ["True", "False"].
+- Spread questions across the learning objectives, focus on conceptual understanding, avoid trick wording, and use the language of the tutor plan.
+
+Do not refer to "last week" or to the tutor plan.
 """)
+
+# Backwards-compatible name for code importing the old prompt symbol.
+warmup_quiz_sys_prompt = assessment_quiz_sys_prompt
 
 guided_sys_msg_tpl = jinja_env.from_string("""\
 You are an AI tutor trained to follow the best practices in teaching and learning, grounded in evidence-based educational research.

@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import asyncio
+from collections import Counter
 from collections.abc import AsyncGenerator, Iterator
+from datetime import UTC, datetime
 
 import msgspec
 from flask import (
@@ -38,9 +40,9 @@ from gened.db import get_db
 from gened.llm import LLM, ChatMessage, with_llm
 
 from . import prompts
-from .chat_helpers import create_guided_chat, create_inquiry_chat, generate_warmup_quiz
+from .chat_helpers import create_guided_chat, create_inquiry_chat, get_or_create_assessment_quizzes
 from .data import chats_data_source, guided_tutor_config_table
-from .data_types import ChatData, GuidedAnalysis, Usage
+from .data_types import ChatData, GuidedAnalysis, QuizAnswer, QuizKind, Usage, WarmupQuiz
 
 MAX_MESSAGE_LEN = 10_000
 TERMINAL_OBJECTIVE_STATUSES = frozenset({'completed', 'moved on'})
@@ -167,16 +169,20 @@ def new_guided_chat(llm: LLM) -> Response:
         return make_response(render_template("error.html"), 400)
 
     warmup_quiz = None
-    assert tutor_config.row_id is not None
-    previous_tutor = guided_tutor_config_table.get_previous_item(tutor_config.row_id)
-    if previous_tutor is not None and previous_tutor.objectives:
+    wrapup_quiz = None
+    if tutor_config.objectives:
         try:
-            warmup_quiz = asyncio.run(generate_warmup_quiz(previous_tutor, llm))
+            warmup_quiz, wrapup_quiz = asyncio.run(get_or_create_assessment_quizzes(tutor_config, llm))
         except (msgspec.DecodeError, msgspec.ValidationError, ValueError) as e:
-            current_app.logger.error(f"Failed to generate warm-up quiz from tutor {previous_tutor.row_id}: {e}")
-            flash("The review quiz could not be generated, so you can continue directly to the chat.", "warning")
+            current_app.logger.error(f"Failed to prepare assessment quizzes for tutor {tutor_config.row_id}: {e}")
+            flash("The warm-up and wrap-up quizzes could not be prepared. Please retry or ask your instructor for help.", "danger")
+            return make_response(render_template("error.html"), 502)
 
-    chat = create_guided_chat(tutor_config, warmup_quiz=warmup_quiz)
+    chat = create_guided_chat(
+        tutor_config,
+        warmup_quiz=warmup_quiz,
+        wrapup_quiz=wrapup_quiz,
+    )
 
     if tutor_config.opening_message:
         # Use the pre-generated/instructor-written opening message; no LLM call needed.
@@ -219,7 +225,32 @@ def chat_interface(chat_id: int) -> str | Response:
         and not chat_data.warmup_quiz.reviewed
     )
     if warmup_active:
-        return render_template("warmup_quiz.html", chat=chat_data, recent_chats=recent_chats)
+        return render_template(
+            "warmup_quiz.html",
+            chat=chat_data,
+            quiz=chat_data.warmup_quiz,
+            quiz_kind="warmup",
+            recent_chats=recent_chats,
+        )
+
+    wrapup_active = (
+        is_owner
+        and is_current_class
+        and guided_chat_complete(chat_data)
+        and chat_data.wrapup_quiz is not None
+        and not chat_data.wrapup_quiz.reviewed
+    )
+    if wrapup_active:
+        if chat_data.wrapup_quiz.started_at is None:
+            chat_data.wrapup_quiz.started_at = datetime.now(UTC).isoformat()
+            save_chat(chat_data)
+        return render_template(
+            "warmup_quiz.html",
+            chat=chat_data,
+            quiz=chat_data.wrapup_quiz,
+            quiz_kind="wrapup",
+            recent_chats=recent_chats,
+        )
 
     show_message_input = is_owner and is_current_class
 
@@ -245,6 +276,71 @@ def _can_update_chat(chat: ChatData) -> bool:
 @bp.route("/<int:chat_id>/warmup", methods=["POST"])
 @class_enabled_required
 def submit_warmup_quiz(chat_id: int) -> Response:
+    return _submit_assessment_quiz(chat_id, quiz_kind="warmup")
+
+
+@bp.route("/<int:chat_id>/wrapup", methods=["POST"])
+@class_enabled_required
+def submit_wrapup_quiz(chat_id: int) -> Response:
+    return _submit_assessment_quiz(chat_id, quiz_kind="wrapup")
+
+
+def _get_assessment_quiz(chat: ChatData, quiz_kind: QuizKind) -> WarmupQuiz | None:
+    return chat.warmup_quiz if quiz_kind == "warmup" else chat.wrapup_quiz
+
+
+def _parse_quiz_answers(quiz: WarmupQuiz) -> list[QuizAnswer] | None:
+    answers: list[QuizAnswer] = []
+    for index, question in enumerate(quiz.questions):
+        raw_answers = request.form.getlist(f"answer_{index}")
+        try:
+            selected = sorted({int(raw_answer) for raw_answer in raw_answers})
+        except ValueError:
+            return None
+        if not selected or any(not 0 <= answer < len(question.options) for answer in selected):
+            return None
+        if question.question_type != 'multiple_choice' and len(selected) != 1:
+            return None
+        answers.append(selected if question.question_type == 'multiple_choice' else selected[0])
+    return answers
+
+
+def _append_warmup_diagnostic(chat: ChatData, quiz: WarmupQuiz) -> None:
+    assert quiz.score is not None
+    objective_totals: Counter[str] = Counter()
+    objective_misses: Counter[str] = Counter()
+    result_lines = [
+        "Before this conversation, the student completed a warm-up diagnostic on the current "
+        f"tutor plan ({quiz.source_tutor_name}) and scored {quiz.score}/{len(quiz.questions)}.",
+        "Prioritize objectives with missed questions. Spend more time assessing, explaining, and practicing those areas while still covering every objective:",
+    ]
+    for answer, question in zip(quiz.answers, quiz.questions, strict=True):
+        objective = question.objective or 'Current objective'
+        correct = question.is_correct(answer)
+        objective_totals[objective] += 1
+        if not correct:
+            objective_misses[objective] += 1
+        selected_indices = [answer] if isinstance(answer, int) else answer
+        selected_text = ', '.join(question.options[index] for index in selected_indices)
+        correct_text = ', '.join(question.options[index] for index in question.correct_answer_indices)
+        result_lines.append(
+            f"- {objective}: {'correct' if correct else 'incorrect'}. "
+            f"Question: {question.question} Student answer: {selected_text}. Correct answer: {correct_text}."
+        )
+
+    weak_objectives = sorted(
+        objective_misses,
+        key=lambda objective: (-objective_misses[objective] / objective_totals[objective], objective),
+    )
+    if weak_objectives:
+        result_lines.insert(2, "Weakest objectives, in priority order: " + "; ".join(weak_objectives))
+    else:
+        result_lines.insert(2, "No objective had a missed warm-up question; confirm understanding and proceed normally.")
+
+    chat.messages[0]['content'] += "\n\n" + "\n".join(result_lines)
+
+
+def _submit_assessment_quiz(chat_id: int, *, quiz_kind: QuizKind) -> Response:
     try:
         chat = get_chat(chat_id)
     except DataAccessError:
@@ -253,43 +349,28 @@ def submit_warmup_quiz(chat_id: int) -> Response:
     if not _can_update_chat(chat):
         abort(403)
 
-    quiz = chat.warmup_quiz
+    quiz = _get_assessment_quiz(chat, quiz_kind)
     if quiz is None:
-        abort(400, "This chat has no warm-up quiz.")
+        abort(400, f"This chat has no {quiz_kind} quiz.")
     if quiz.completed:
         return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
+    if quiz_kind == "wrapup" and not guided_chat_complete(chat):
+        abort(409, "The wrap-up quiz is available after the tutor session is complete.")
 
-    answers: list[int] = []
-    for index, question in enumerate(quiz.questions):
-        raw_answer = request.form.get(f"answer_{index}")
-        try:
-            answer = int(raw_answer) if raw_answer is not None else -1
-        except ValueError:
-            answer = -1
-        if not 0 <= answer < len(question.options):
-            flash("Please answer every review question before submitting.", "warning")
-            return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
-        answers.append(answer)
+    answers = _parse_quiz_answers(quiz)
+    if answers is None:
+        flash("Please answer every question before submitting.", "warning")
+        return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
 
     quiz.answers = answers
     quiz.score = sum(
-        answer == question.correct_index
+        question.is_correct(answer)
         for answer, question in zip(answers, quiz.questions, strict=True)
     )
     quiz.completed = True
-
-    result_lines = [
-        "Before this conversation, the student completed a review quiz based on "
-        f"the previous tutor plan ({quiz.source_tutor_name}) and scored {quiz.score}/{len(quiz.questions)}.",
-        "Use these results only to identify material that may benefit from reinforcement:",
-    ]
-    for answer, question in zip(answers, quiz.questions, strict=True):
-        result = "correct" if answer == question.correct_index else "incorrect"
-        result_lines.append(
-            f"- {question.objective or 'Prior objective'}: {result}. "
-            f"Question: {question.question} Correct answer: {question.options[question.correct_index]}"
-        )
-    chat.messages[0]['content'] += "\n\n" + "\n".join(result_lines)
+    quiz.completed_at = datetime.now(UTC).isoformat()
+    if quiz_kind == "warmup":
+        _append_warmup_diagnostic(chat, quiz)
     save_chat(chat)
 
     return redirect(url_for("tutors.chat_interface", chat_id=chat.id))
@@ -298,6 +379,16 @@ def submit_warmup_quiz(chat_id: int) -> Response:
 @bp.route("/<int:chat_id>/warmup/continue", methods=["POST"])
 @class_enabled_required
 def finish_warmup_quiz(chat_id: int) -> Response:
+    return _finish_assessment_quiz(chat_id, quiz_kind="warmup")
+
+
+@bp.route("/<int:chat_id>/wrapup/continue", methods=["POST"])
+@class_enabled_required
+def finish_wrapup_quiz(chat_id: int) -> Response:
+    return _finish_assessment_quiz(chat_id, quiz_kind="wrapup")
+
+
+def _finish_assessment_quiz(chat_id: int, *, quiz_kind: QuizKind) -> Response:
     try:
         chat = get_chat(chat_id)
     except DataAccessError:
@@ -306,9 +397,9 @@ def finish_warmup_quiz(chat_id: int) -> Response:
     if not _can_update_chat(chat):
         abort(403)
 
-    quiz = chat.warmup_quiz
+    quiz = _get_assessment_quiz(chat, quiz_kind)
     if quiz is None or not quiz.completed:
-        abort(400, "Complete the warm-up quiz before continuing.")
+        abort(400, f"Complete the {quiz_kind} quiz before continuing.")
 
     quiz.reviewed = True
     save_chat(chat)
@@ -453,7 +544,13 @@ def get_progress(chat_id: int) -> Response:
             chat_complete=guided_chat_complete(chat_data),
         )
     )
-    response.headers['X-Chat-Complete'] = str(guided_chat_complete(chat_data)).lower()
+    chat_complete = guided_chat_complete(chat_data)
+    response.headers['X-Chat-Complete'] = str(chat_complete).lower()
+    response.headers['X-Wrapup-Ready'] = str(
+        chat_complete
+        and chat_data.wrapup_quiz is not None
+        and not chat_data.wrapup_quiz.reviewed
+    ).lower()
     return response
 
 

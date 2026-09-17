@@ -105,6 +105,14 @@ def get_chats(filters: Filters, /, limit: int=-1, offset: int=0) -> Cursor:
             json_extract(t.chat_json, '$.topic') AS topic,
             t.chat_json AS chat_json,
             json_extract(t.chat_json, '$.analysis') AS analysis,
+            json_extract(t.chat_json, '$.warmup_quiz.score') AS "warm-up score",
+            json_extract(t.chat_json, '$.wrapup_quiz.score') AS "wrap-up score",
+            CASE
+                WHEN json_extract(t.chat_json, '$.warmup_quiz.score') IS NOT NULL
+                 AND json_extract(t.chat_json, '$.wrapup_quiz.score') IS NOT NULL
+                THEN json_extract(t.chat_json, '$.wrapup_quiz.score')
+                   - json_extract(t.chat_json, '$.warmup_quiz.score')
+            END AS "learning gain",
             classes.id AS class_id,
             (
                 SELECT COUNT(*)
@@ -170,7 +178,17 @@ chats_data_source = DataSource(
     display_name='Chats',
     get_data=get_chats,
     table_spec=DataTableSpec(
-        columns=[NumCol('id'), UserCol('user'), TimeCol('chat_started'), Col('topic'), NumCol('user messages'), AnalysisCol('analysis')],
+        columns=[
+            NumCol('id'),
+            UserCol('user'),
+            TimeCol('chat_started'),
+            Col('topic'),
+            NumCol('warm-up score'),
+            NumCol('wrap-up score'),
+            NumCol('learning gain'),
+            NumCol('user messages'),
+            AnalysisCol('analysis'),
+        ],
         link_col=0,
         link_template='/tutor/${value}',
     ),

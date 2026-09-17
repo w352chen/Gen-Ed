@@ -32,37 +32,59 @@ SPDX-License-Identifier: AGPL-3.0-only
   <div class="column is-three-quarters-desktop">
     <section class="section">
       <div class="container content">
-        {% set quiz = chat.warmup_quiz %}
-        <h1 class="title">Warm-up review</h1>
-        <p>
-          Before starting <strong>{{ chat.topic }}</strong>, review material from
-          <strong>{{ quiz.source_tutor_name }}</strong>.
-        </p>
+        <h1 class="title">{{ "Warm-up Quiz" if quiz_kind == "warmup" else "Wrap-up Quiz" }}</h1>
+        {% if quiz_kind == "warmup" %}
+          <p>
+            This 10-question diagnostic covers the learning objectives for
+            <strong>{{ quiz.source_tutor_name }}</strong>. Your results help the AI tutor
+            spend more time on the areas where you need support.
+          </p>
+        {% else %}
+          <p>
+            Complete this 10-question learning check for <strong>{{ quiz.source_tutor_name }}</strong>
+            to measure what you learned during the tutor session.
+          </p>
+        {% endif %}
 
         {% if quiz.completed %}
           <div class="notification is-info is-light">
             <strong>Your score: {{ quiz.score }} / {{ quiz.questions | length }}</strong>
-            <br>Review the answers and explanations below, then continue to the tutor chat.
+            {% if quiz_kind == "wrapup" and chat.warmup_quiz and chat.warmup_quiz.score is not none %}
+              {% set gain = quiz.score - chat.warmup_quiz.score %}
+              <br><strong>Learning gain: {{ "+" if gain > 0 else "" }}{{ gain }} points</strong>
+            {% endif %}
+            <br>Review the answers and explanations below, then
+            {{ "continue to the tutor chat" if quiz_kind == "warmup" else "finish the session" }}.
           </div>
         {% endif %}
 
-        <form method="post" action="{{ url_for('tutors.finish_warmup_quiz' if quiz.completed else 'tutors.submit_warmup_quiz', chat_id=chat.id) }}">
+        {% if quiz_kind == "warmup" %}
+          {% set submit_endpoint = 'tutors.finish_warmup_quiz' if quiz.completed else 'tutors.submit_warmup_quiz' %}
+        {% else %}
+          {% set submit_endpoint = 'tutors.finish_wrapup_quiz' if quiz.completed else 'tutors.submit_wrapup_quiz' %}
+        {% endif %}
+        <form method="post" action="{{ url_for(submit_endpoint, chat_id=chat.id) }}">
           {% for question in quiz.questions %}
             {% set question_index = loop.index0 %}
+            {% set selected_indices = quiz.answer_indices(question_index) if quiz.completed else [] %}
+            {% set correct_indices = question.correct_answer_indices %}
             <article class="box">
               <p class="has-text-grey mb-2">Question {{ loop.index }} of {{ quiz.questions | length }}</p>
+              <p class="tag is-light mb-2">
+                {% if question.question_type == 'multiple_choice' %}Select all that apply{% elif question.question_type == 'true_false' %}True or false{% else %}Select one{% endif %}
+              </p>
               <div class="is-size-5 mb-3">{{ question.question | markdown }}</div>
 
               {% for option in question.options %}
-                {% set is_selected = quiz.completed and quiz.answers[question_index] == loop.index0 %}
-                {% set is_correct = quiz.completed and question.correct_index == loop.index0 %}
+                {% set is_selected = quiz.completed and loop.index0 in selected_indices %}
+                {% set is_correct = quiz.completed and loop.index0 in correct_indices %}
                 <label class="quiz-option{% if is_correct %} is-correct{% elif is_selected %} is-incorrect{% endif %}">
                   <input
-                    type="radio"
+                    type="{{ 'checkbox' if question.question_type == 'multiple_choice' else 'radio' }}"
                     name="answer_{{ question_index }}"
                     value="{{ loop.index0 }}"
                     {% if is_selected %}checked{% endif %}
-                    {% if quiz.completed %}disabled{% else %}required{% endif %}>
+                    {% if quiz.completed %}disabled{% elif question.question_type != 'multiple_choice' %}required{% endif %}>
                   <span class="ml-2">{{ option }}</span>
                   {% if is_correct %}<strong class="has-text-success ml-2">Correct answer</strong>{% endif %}
                   {% if is_selected and not is_correct %}<strong class="has-text-danger ml-2">Your answer</strong>{% endif %}
@@ -78,7 +100,11 @@ SPDX-License-Identifier: AGPL-3.0-only
           {% endfor %}
 
           <button class="button is-link is-medium" type="submit">
-            {{ "Continue to tutor chat" if quiz.completed else "Submit answers" }}
+            {% if quiz.completed %}
+              {{ "Continue to tutor chat" if quiz_kind == "warmup" else "Finish session" }}
+            {% else %}
+              Submit answers
+            {% endif %}
           </button>
         </form>
       </div>

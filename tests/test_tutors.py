@@ -4,15 +4,17 @@
 
 """Tests for tutors component serialization and data models."""
 
+import asyncio
 import re
 from typing import Any
 
 import msgspec
 import pytest
 from flask import Flask
-from werkzeug.datastructures import ImmutableMultiDict
+from werkzeug.datastructures import ImmutableMultiDict, MultiDict
 
 from components.tutors.chat import guided_chat_complete
+from components.tutors.chat_helpers import get_or_create_assessment_quizzes
 from components.tutors.data import fmt_analysis
 from components.tutors.data_types import (
     ChatData,
@@ -26,6 +28,59 @@ from components.tutors.data_types import (
 )
 from gened.db import get_db
 from tests.conftest import AppClient
+
+
+def assessment_questions(prefix: str, objective: str) -> list[WarmupQuizQuestion]:
+    """Build a valid 10-question mixed-format assessment for tests."""
+    questions = [
+        WarmupQuizQuestion(
+            question=f"{prefix} single choice",
+            options=["Correct", "Incorrect"],
+            correct_indices=[0],
+            explanation="Single-choice explanation.",
+            objective=objective,
+            question_type="single_choice",
+        ),
+        WarmupQuizQuestion(
+            question=f"{prefix} multiple choice",
+            options=["Correct A", "Correct B", "Incorrect"],
+            correct_indices=[0, 1],
+            explanation="Multiple-choice explanation.",
+            objective=objective,
+            question_type="multiple_choice",
+        ),
+        WarmupQuizQuestion(
+            question=f"{prefix} true or false",
+            options=["True", "False"],
+            correct_indices=[0],
+            explanation="True/false explanation.",
+            objective=objective,
+            question_type="true_false",
+        ),
+    ]
+    questions.extend(
+        WarmupQuizQuestion(
+            question=f"{prefix} single choice {index}",
+            options=["Correct", "Incorrect"],
+            correct_indices=[0],
+            explanation="Single-choice explanation.",
+            objective=objective,
+            question_type="single_choice",
+        )
+        for index in range(4, 11)
+    )
+    return questions
+
+
+def correct_quiz_form(questions: list[WarmupQuizQuestion], *, first_wrong: bool = False) -> MultiDict[str, str]:
+    data: MultiDict[str, str] = MultiDict()
+    for index, question in enumerate(questions):
+        correct_indices = question.correct_answer_indices
+        if first_wrong and index == 0:
+            correct_indices = [1]
+        for answer in correct_indices:
+            data.add(f"answer_{index}", str(answer))
+    return data
 
 
 def test_chat_data_roundtrip() -> None:
@@ -92,11 +147,29 @@ def test_chat_data_roundtrip_with_warmup_quiz() -> None:
         score=1,
         completed=True,
     )
+    wrapup = WarmupQuiz(
+        source_tutor_name="Week 1",
+        quiz_kind="wrapup",
+        questions=[
+            WarmupQuizQuestion(
+                question="Select both mutable collections.",
+                options=["list", "dict", "tuple"],
+                correct_indices=[0, 1],
+                explanation="Lists and dictionaries are mutable.",
+                objective="Explain mutability",
+                question_type="multiple_choice",
+            )
+        ],
+        answers=[[0, 1]],
+        score=1,
+        completed=True,
+    )
     original = ChatData(
-        topic="Week 2",
+        topic="Week 1",
         messages=[{'role': 'system', 'content': 'Tutor instructions'}],
         mode="guided",
         warmup_quiz=quiz,
+        wrapup_quiz=wrapup,
     )
 
     restored = msgspec.json.decode(msgspec.json.encode(original), type=ChatData)
@@ -105,6 +178,8 @@ def test_chat_data_roundtrip_with_warmup_quiz() -> None:
     assert restored.warmup_quiz is not None
     assert restored.warmup_quiz.score == 1
     assert not restored.warmup_quiz.reviewed
+    assert restored.wrapup_quiz is not None
+    assert restored.wrapup_quiz.answers == [[0, 1]]
 
 
 def test_tutor_config_roundtrip() -> None:
@@ -411,64 +486,31 @@ def test_chat_save_and_retrieve(app: Flask, client: AppClient) -> None:
 def test_guided_chat_warmup_quiz_flow(
     app: Flask,
     client: AppClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    previous = TutorConfig(
-        name="Week 1: Python values",
-        topic="Python values",
-        context="An introductory Python course",
-        objectives=[
-            LearningObjective(
-                name="Distinguish mutable and immutable values",
-                questions=["Which built-in Python values can be changed in place?"],
-            )
-        ],
-        opening_message="Welcome to week 1",
-    )
+    objective = "Define and call a function"
+    warmup_questions = assessment_questions("Warm-up", objective)
+    wrapup_questions = assessment_questions("Wrap-up", objective)
     current = TutorConfig(
         name="Week 2: Functions",
         topic="Python functions",
         context="An introductory Python course",
-        objectives=[LearningObjective(name="Define and call a function")],
+        objectives=[LearningObjective(name=objective)],
         opening_message="Welcome to week 2",
+        warmup_questions=warmup_questions,
+        wrapup_questions=wrapup_questions,
     )
 
     with app.app_context():
         db = get_db()
-        db.execute(
-            """
-            INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
-            VALUES (2, 'guided_tutor', ?, 10, '0001-01-01', ?)
-            """,
-            [previous.name, previous.to_json()],
-        )
         cursor = db.execute(
             """
             INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
-            VALUES (2, 'guided_tutor', ?, 11, '0001-01-01', ?)
+            VALUES (2, 'guided_tutor', ?, 10, '0001-01-01', ?)
             """,
             [current.name, current.to_json()],
         )
         current_id = cursor.lastrowid
         db.commit()
-
-    async def fake_generate_warmup(previous_tutor: TutorConfig, _llm: Any) -> WarmupQuiz:
-        assert previous_tutor.name == previous.name
-        return WarmupQuiz(
-            source_tutor_name=previous_tutor.name,
-            questions=[
-                WarmupQuizQuestion(
-                    question=f"Review question {index + 1}",
-                    options=["Correct", "Incorrect"],
-                    correct_index=0,
-                    explanation="This is the explanation.",
-                    objective=previous_tutor.objectives[0].name,
-                )
-                for index in range(10)
-            ],
-        )
-
-    monkeypatch.setattr("components.tutors.chat.generate_warmup_quiz", fake_generate_warmup)
 
     client.login('testuser', 'testpassword')
     client.get('/classes/switch/2')
@@ -478,8 +520,10 @@ def test_guided_chat_warmup_quiz_flow(
 
     response = client.get(chat_url)
     assert response.status_code == 200
-    assert 'Warm-up review' in response.text
-    assert previous.name in response.text
+    assert 'Warm-up Quiz' in response.text
+    assert current.name in response.text
+    assert 'Select all that apply' in response.text
+    assert 'True or false' in response.text
     assert 'Question 10 of 10' in response.text
 
     chat_id = int(chat_url.rstrip('/').rsplit('/', 1)[1])
@@ -488,16 +532,16 @@ def test_guided_chat_warmup_quiz_flow(
 
     response = client.post(
         f'/tutor/{chat_id}/warmup',
-        data={f'answer_{index}': '0' for index in range(10)},
+        data=correct_quiz_form(warmup_questions, first_wrong=True),
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert 'Your score: 10 / 10' in response.text
+    assert 'Your score: 9 / 10' in response.text
     assert 'Correct answer' in response.text
 
     response = client.post(f'/tutor/{chat_id}/warmup/continue', follow_redirects=True)
     assert response.status_code == 200
-    assert 'Warm-up review' not in response.text
+    assert 'Warm-up Quiz' not in response.text
     assert 'Welcome to week 2' in response.text
 
     with app.app_context():
@@ -505,20 +549,65 @@ def test_guided_chat_warmup_quiz_flow(
         saved_chat = msgspec.json.decode(chat_json, type=ChatData)
         assert saved_chat.warmup_quiz is not None
         assert saved_chat.warmup_quiz.reviewed
-        assert "scored 10/10" in saved_chat.messages[0]['content']
+        assert saved_chat.warmup_quiz.completed_at is not None
+        assert "current tutor plan" in saved_chat.messages[0]['content']
+        assert "scored 9/10" in saved_chat.messages[0]['content']
+        assert "Weakest objectives" in saved_chat.messages[0]['content']
+
+        assert saved_chat.analysis is not None
+        saved_chat.analysis = GuidedAnalysis(
+            summary="All objectives addressed",
+            progress=[GuidedObjectiveProgress(objective=objective, status="completed")],
+        )
+        get_db().execute(
+            "UPDATE chats SET chat_json=? WHERE id=?",
+            [msgspec.json.encode(saved_chat).decode(), chat_id],
+        )
+        get_db().commit()
+
+    response = client.get(chat_url)
+    assert response.status_code == 200
+    assert 'Wrap-up Quiz' in response.text
+    assert 'Question 10 of 10' in response.text
+
+    response = client.post(
+        f'/tutor/{chat_id}/wrapup',
+        data=correct_quiz_form(wrapup_questions),
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert 'Your score: 10 / 10' in response.text
+    assert 'Learning gain: +1 points' in response.text
+
+    response = client.post(f'/tutor/{chat_id}/wrapup/continue', follow_redirects=True)
+    assert response.status_code == 200
+    assert 'Assessment results:' in response.text
+    assert 'Warm-up 9/10' in response.text
+    assert 'Wrap-up 10/10' in response.text
+    assert 'Learning gain +1' in response.text
+
+    with app.app_context():
+        chat_json = get_db().execute("SELECT chat_json FROM chats WHERE id=?", [chat_id]).fetchone()['chat_json']
+        saved_chat = msgspec.json.decode(chat_json, type=ChatData)
+        assert saved_chat.wrapup_quiz is not None
+        assert saved_chat.wrapup_quiz.reviewed
+        assert saved_chat.wrapup_quiz.completed_at is not None
+        assert saved_chat.wrapup_quiz.answers[1] == [0, 1]
 
 
-def test_first_guided_tutor_starts_without_warmup(
+def test_first_guided_tutor_uses_current_session_warmup(
     app: Flask,
     client: AppClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    objective = "Recognize the core terminology"
     first_tutor = TutorConfig(
         name="Week 1",
         topic="Course introduction",
         context="An introductory course",
-        objectives=[LearningObjective(name="Recognize the core terminology")],
+        objectives=[LearningObjective(name=objective)],
         opening_message="Welcome to the first week",
+        warmup_questions=assessment_questions("Week 1 warm-up", objective),
+        wrapup_questions=assessment_questions("Week 1 wrap-up", objective),
     )
     with app.app_context():
         cursor = get_db().execute(
@@ -531,15 +620,57 @@ def test_first_guided_tutor_starts_without_warmup(
         tutor_id = cursor.lastrowid
         get_db().commit()
 
-    async def unexpected_generate(_previous_tutor: TutorConfig, _llm: Any) -> WarmupQuiz:
-        pytest.fail("The first tutor must not generate a warm-up quiz")
-
-    monkeypatch.setattr("components.tutors.chat.generate_warmup_quiz", unexpected_generate)
     client.login('testuser', 'testpassword')
     client.get('/classes/switch/2')
 
     response = client.post('/tutor/new/guided', data={'tutor_id': tutor_id}, follow_redirects=True)
 
     assert response.status_code == 200
-    assert 'Warm-up review' not in response.text
-    assert 'Welcome to the first week' in response.text
+    assert 'Warm-up Quiz' in response.text
+    assert 'Week 1 warm-up single choice' in response.text
+    assert 'previous' not in response.text.lower()
+
+
+def test_assessment_quizzes_are_generated_once_and_reused(
+    app: Flask,
+) -> None:
+    objective = "Use Python functions"
+    tutor = TutorConfig(
+        name="Functions",
+        topic="Python functions",
+        objectives=[LearningObjective(name=objective)],
+    )
+    response_payloads = [
+        {"questions": msgspec.to_builtins(assessment_questions("Shared warm-up", objective))},
+        {"questions": msgspec.to_builtins(assessment_questions("Shared wrap-up", objective))},
+    ]
+
+    class FakeLLM:
+        calls = 0
+
+        async def get_completion(self, **_kwargs: Any) -> tuple[dict[str, Any], str]:
+            self.calls += 1
+            return {}, msgspec.json.encode(response_payloads[self.calls - 1]).decode()
+
+    fake_llm: Any = FakeLLM()
+    with app.app_context():
+        cursor = get_db().execute(
+            """
+            INSERT INTO config_items (class_id, item_type, name, class_order, available, config)
+            VALUES (2, 'guided_tutor', ?, 10, '0001-01-01', ?)
+            """,
+            [tutor.name, tutor.to_json()],
+        )
+        tutor.row_id = cursor.lastrowid
+        get_db().commit()
+
+        first_warmup, first_wrapup = asyncio.run(get_or_create_assessment_quizzes(tutor, fake_llm))
+        assert fake_llm.calls == 2
+
+        row = get_db().execute("SELECT * FROM config_items WHERE id=?", [tutor.row_id]).fetchone()
+        reloaded = TutorConfig.from_row(row)
+        second_warmup, second_wrapup = asyncio.run(get_or_create_assessment_quizzes(reloaded, fake_llm))
+
+    assert fake_llm.calls == 2
+    assert first_warmup.questions == second_warmup.questions
+    assert first_wrapup.questions == second_wrapup.questions

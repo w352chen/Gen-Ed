@@ -145,6 +145,10 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
         if (response.ok) {
           this.progress = await response.text();
           this.completed = response.headers.get('X-Chat-Complete') === 'true';
+          if (response.headers.get('X-Wrapup-Ready') === 'true') {
+            window.location.assign('{{ url_for('tutors.chat_interface', chat_id=chat.id) }}');
+            return;
+          }
         } else {
           console.log(`Fetch error: ${response}`);
         }
@@ -316,6 +320,18 @@ window.md.renderer.rules.math_block = (tokens, idx) => `\\[${md.utils.escapeHtml
         {% endif %}
 
         <h1 class="title is-size-4">Topic: {{ chat.topic }}</h1>
+
+        {% if chat.warmup_quiz and chat.warmup_quiz.completed %}
+          <div class="notification is-light">
+            <strong>Assessment results:</strong>
+            Warm-up {{ chat.warmup_quiz.score }}/{{ chat.warmup_quiz.questions | length }}
+            {% if chat.wrapup_quiz and chat.wrapup_quiz.completed %}
+              {% set learning_gain = chat.wrapup_quiz.score - chat.warmup_quiz.score %}
+              · Wrap-up {{ chat.wrapup_quiz.score }}/{{ chat.wrapup_quiz.questions | length }}
+              · Learning gain {{ "+" if learning_gain > 0 else "" }}{{ learning_gain }}
+            {% endif %}
+          </div>
+        {% endif %}
 
         {% if chat.context_name %}
           <p class="is-size-5"><b>Context:</b> {{ chat.context_name }}</p>

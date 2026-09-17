@@ -12,6 +12,9 @@ from gened.llm import ChatMessage
 
 ChatMode: TypeAlias = Literal["inquiry", "guided"]
 ObjectiveStatus: TypeAlias = Literal["not started", "moved on", "in progress", "completed"]
+QuizKind: TypeAlias = Literal["warmup", "wrapup"]
+QuizQuestionType: TypeAlias = Literal["single_choice", "multiple_choice", "true_false"]
+QuizAnswer: TypeAlias = int | list[int]
 
 
 class ObjectivesResponse(msgspec.Struct):
@@ -25,12 +28,28 @@ class QuestionsResponse(msgspec.Struct):
 
 
 class WarmupQuizQuestion(msgspec.Struct):
-    """A single multiple-choice or true/false warm-up question."""
+    """A single question used in a warm-up or wrap-up assessment.
+
+    ``correct_index`` remains for backwards compatibility with quizzes saved by
+    older releases. New multiple-answer questions use ``correct_indices``.
+    """
     question: str
     options: list[str]
-    correct_index: int
-    explanation: str
+    correct_index: int = -1
+    explanation: str = ""
     objective: str = ""
+    question_type: QuizQuestionType = "single_choice"
+    correct_indices: list[int] = []
+
+    @property
+    def correct_answer_indices(self) -> list[int]:
+        if self.correct_indices:
+            return sorted(set(self.correct_indices))
+        return [self.correct_index] if self.correct_index >= 0 else []
+
+    def is_correct(self, answer: QuizAnswer) -> bool:
+        selected = [answer] if isinstance(answer, int) else answer
+        return sorted(set(selected)) == self.correct_answer_indices
 
 
 class WarmupQuizResponse(msgspec.Struct):
@@ -39,13 +58,22 @@ class WarmupQuizResponse(msgspec.Struct):
 
 
 class WarmupQuiz(msgspec.Struct, kw_only=True):
-    """A generated warm-up quiz and one student's attempt."""
+    """A standardized assessment and one student's attempt."""
     source_tutor_name: str
     questions: list[WarmupQuizQuestion]
-    answers: list[int] = []
+    quiz_kind: QuizKind = "warmup"
+    answers: list[QuizAnswer] = []
     score: int | None = None
     completed: bool = False
     reviewed: bool = False
+    started_at: str | None = None
+    completed_at: str | None = None
+
+    def answer_indices(self, index: int) -> list[int]:
+        if index >= len(self.answers):
+            return []
+        answer = self.answers[index]
+        return [answer] if isinstance(answer, int) else answer
 
 
 class ContextDocument(msgspec.Struct, kw_only=True):
@@ -65,6 +93,10 @@ class TutorConfig(ConfigItem):
     documents: list[ContextDocument] = []     # noqa: RUF012 - ConfigItem is a msgspec.Struct, so this is okay
     objectives: list[LearningObjective] = []  # noqa: RUF012 - ConfigItem is a msgspec.Struct, so this is okay
     opening_message: str = ""
+    # Generated once per tutor configuration and then reused for every student,
+    # ensuring comparable class-level results.
+    warmup_questions: list[WarmupQuizQuestion] = []  # noqa: RUF012
+    wrapup_questions: list[WarmupQuizQuestion] = []  # noqa: RUF012
 
     @classmethod
     def from_request_form(cls, form: ImmutableMultiDict[str, Any]) -> Self:
@@ -168,6 +200,7 @@ class ChatData(msgspec.Struct, kw_only=True, omit_defaults=True):
     usages: list[Usage] = []
     analysis: GuidedAnalysis | None = None
     warmup_quiz: WarmupQuiz | None = None
+    wrapup_quiz: WarmupQuiz | None = None
 
     # We have to cast to list[ChatMessage] before passing these into OpenAI API
     # functions, because MyPy can't tell our custom ChatMessageX is a valid
